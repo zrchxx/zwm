@@ -9,10 +9,19 @@
 #include <X11/Xlib.h>
 
 // TODO
-// 1. Fullscreen work but dont restore the window
-// 2. Add some tilling windows
+// 1. Add some tilling windows
 
 // Globals //
+
+// Structures
+typedef struct Client Client; 
+struct Client {
+  int x, y, h, w;
+  int oldX, oldY, oldH, oldW;
+  int focused, unfocused, isFullscreen;
+  struct Client *next;
+  Window win;
+};
 
 // Atoms
 Atom netSupported, netWMState, netWMStateFullscreen;
@@ -22,6 +31,7 @@ static Display *dp;
 static Window rt;
 static Screen *sc;
 static XEvent ev;
+static Client *clientList = NULL;
 static int running = 1;
 
 #include "config.h"
@@ -54,20 +64,6 @@ void spawn(const char *cmd[])
         exit(1);
     }
 }
-// Handle zombies childs
-void chldHandle(int sig)
-{
-    while (waitpid(-1, NULL, WNOHANG) > 0);
-}
-
-// Handle X11 errors
-int xerrorHandler(Display *dp, XErrorEvent *ee) 
-{
-    fprintf(stderr,"X11 error:type %d,serial %ld,code %d,request %d,minor %d\n",
-            ee->type, ee->serial, ee->error_code, ee->request_code, 
-            ee->minor_code);
-    return 0;
-}
 
 // Autostart programs and deamons
 void autostart(void)
@@ -80,24 +76,95 @@ void autostart(void)
     };
 }
 
-// Set the focused window to fullscreen
-void setFullscreen(int x, int y, int w, int h, int fullscreen)
+// Handle zombies childs
+void chldHandle(int sig)
 {
-    if (fullscreen == 1) 
-    {   
-        XChangeProperty(dp, ev.xkey.subwindow, netWMState, XA_ATOM, 32, 
-                        PropModeReplace, 
-                        (unsigned char *)&netWMStateFullscreen, 1);
-        XMoveResizeWindow(dp, ev.xkey.subwindow, 0, 0, 
-                          XWidthOfScreen(sc), XHeightOfScreen(sc));
-        XRaiseWindow(dp, ev.xkey.subwindow);
-   
-    } else if (fullscreen == 0)
+    while (waitpid(-1, NULL, WNOHANG) > 0);
+}
+
+// Find a client by his window id
+Client *srchClient(Window w)
+{
+    // Create a pointer to the current client
+    Client *curr = clientList;
+    
+    // Search while current is null
+    while (curr != NULL) 
     {
-        XDeleteProperty(dp, ev.xkey.subwindow, netWMState);
-        XMoveResizeWindow(dp, ev.xkey.subwindow, x, y, w, h);
+        // If current is equal to w then return current;
+        if (curr->win == w) {
+            return curr;         
+        }
+        // Else check next node
+        curr = curr->next;
     }
-    XFlush(dp);
+    
+    return NULL;
+}
+
+// Add a client to the list
+void addClient(Window w)
+{
+    // Search if the client is been already created
+    if (srchClient(w) != NULL) 
+    {
+        return;
+    }
+
+    // Allocate memory for the new client
+    Client *new = malloc(sizeof(Client));
+
+    // Handle memory allocation error
+    if (new == NULL) 
+    {
+        return;
+    }
+
+    // Write the variables of the client
+    XWindowAttributes wa;
+    XGetWindowAttributes(dp, w, &wa);
+
+    new->win = w;
+    new->isFullscreen = 0;
+    new->x = (XWidthOfScreen(sc) - wa.width) / 2;
+    new->y = (XHeightOfScreen(sc) - wa.height) / 2;
+    new->w = wa.width;
+    new->h = wa.height;
+
+    // Add it to the front of the list
+    new->next = clientList;
+    clientList = new;
+}
+
+void rmClient(Window w)
+{
+    // Previous client need to re link the list
+    Client *curr = clientList;
+    Client *prev = NULL;
+
+    while (curr != NULL) 
+    {
+        if (curr->win == w) 
+        {
+            // If its the first on the list
+            if (prev == NULL) 
+            {
+                clientList = curr->next;
+            }
+            else  // If its in the middle or end
+            {
+                prev->next = curr->next;
+            }
+            // Free the memory
+            free(curr);
+            return;
+        }
+        // Change
+        prev = curr;
+        curr = curr->next;
+    }
+
+
 }
 
 // Handle events
@@ -108,18 +175,25 @@ void evHandler(void)
         // Open the windows in the center of the screen
         case MapRequest: 
         {
+            Window win = ev.xmaprequest.window;
+            
+            addClient(win);
+
             XWindowAttributes wa;
-            XGetWindowAttributes(dp, ev.xmaprequest.window, &wa);
+            XGetWindowAttributes(dp, win, &wa);
             
             int x = (XWidthOfScreen(sc) - wa.width) / 2;
             int y = (XHeightOfScreen(sc) - wa.height) / 2;
 
-            XMoveResizeWindow(dp, ev.xmaprequest.window, x, y, 
-                              wa.width, wa.height);
-            
-            XMapWindow(dp, ev.xmaprequest.window);
-            XSetInputFocus(dp, ev.xmaprequest.window, RevertToParent, 
-                           CurrentTime);
+            XMoveResizeWindow(dp, win, x, y, wa.width, wa.height);
+            XMapWindow(dp, win);
+            XSetInputFocus(dp, win, RevertToParent, CurrentTime);
+            break;
+        }
+        case DestroyNotify: 
+        {
+            Window win = ev.xdestroywindow.window;
+            rmClient(win);
             break;
         }
         // Check for key press
@@ -137,23 +211,45 @@ void evHandler(void)
             // Toggle fullscreen for a client
             if (ev.xkey.keycode == stringToKeycode("g"))
             {   
-                int isFullscreen = 0;
-                XWindowAttributes wa;
-                XGetWindowAttributes(dp, ev.xkey.subwindow, &wa);
+                Window win = ev.xkey.subwindow;
                 
-                if (wa.width != XWidthOfScreen(sc) && 
-                    wa.height != XHeightOfScreen(sc)) 
+                // Ignore root window
+                if (win == 0) 
                 {
-                    isFullscreen = 1;
-                } else if (wa.width == XWidthOfScreen(sc)&& 
-                           wa.height == XHeightOfScreen(sc)) 
-                {
-                    isFullscreen = 0;
+                    break;
                 }
+
+                Client *c = srchClient(win);
                 
-                setFullscreen((XWidthOfScreen(sc) - wa.width) / 2, 
-                              (XHeightOfScreen(sc) - wa.height) / 2, 
-                              wa.width, wa.height, isFullscreen);
+                // Do nothing if the client window do not match
+                if (c == NULL) 
+                {
+                    break;
+                }
+
+                // Toggle fullscreen
+                if (c->isFullscreen) 
+                {
+                    c->isFullscreen = 0;
+                    XMoveResizeWindow(dp, c->win, c->oldX, c->oldY, 
+                                      c->oldW, c->oldH);
+                    XDeleteProperty(dp, c->win, netWMState);
+                } 
+                else 
+                {
+                    c->oldX = c->x;
+                    c->oldY = c->y;
+                    c->oldW = c->w;
+                    c->oldH = c->h;
+
+                    c->isFullscreen = 1;
+                    XMoveResizeWindow(dp, c->win, 0, 0, 
+                                      XWidthOfScreen(sc), XHeightOfScreen(sc));
+                    XChangeProperty(dp, c->win, netWMState, XA_ATOM, 32, 
+                                    PropModeReplace, 
+                                    (unsigned char *)&netWMStateFullscreen, 1);
+                }
+                XFlush(dp);
             }
             // Open a terminal
             if (ev.xkey.keycode == stringToKeycode("k")) 
@@ -186,6 +282,15 @@ void handleAtoms(void)
     XChangeProperty(dp, rt, netSupported, XA_ATOM, 32, PropModeReplace, 
                     (unsigned char *)netSupportedAtoms, 
                     sizeof(netSupportedAtoms) / sizeof(Atom));
+}
+
+// Handle X11 errors
+int xerrorHandler(Display *dp, XErrorEvent *ee) 
+{
+    fprintf(stderr,"X11 error:type %d,serial %ld,code %d,request %d,minor %d\n",
+            ee->type, ee->serial, ee->error_code, ee->request_code, 
+            ee->minor_code);
+    return 0;
 }
 
 // Check and balances
@@ -223,20 +328,6 @@ void setup(void)
     XFlush(dp);
 }
 
-// Main loop
-void run(void)
-{
-    // Sync calls
-    XSync(dp, False);
-    
-    while (running)
-    {
-        XNextEvent(dp, &ev);
-        // Check for events
-        evHandler();
-    }
-}
-
 int main(void)
 {
     // Check if theres a display
@@ -249,8 +340,15 @@ int main(void)
     // Check and load stuff to memory
     setup();
     
-    // Main loop
-    run();
+    // Sync calls
+    XSync(dp, False);
+    
+    while (running)
+    {
+        XNextEvent(dp, &ev);
+        // Check for events
+        evHandler();
+    }
 
     // Close the display
     XCloseDisplay(dp);
