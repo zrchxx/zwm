@@ -1,4 +1,10 @@
+# ZWM version
+VERSION = 0.4
+
+CC = gcc
+
 zwm: zwm.c
-	$(CC) -Wall -Wextra -o zwm zwm.c -lX11
+	$(CC) -Wall -o zwm zwm.c -lX11
+
 clean: 
 	rm -rf zwm
