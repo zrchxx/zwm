@@ -8,7 +8,9 @@
 #include <X11/X.h>
 #include <X11/keysym.h>
 #include <X11/Xatom.h>
+#include <X11/XKBlib.h>
 #include <X11/Xlib.h>
+#include <X11/Xproto.h>
 
 // TODO
 // 1. A LOT
@@ -18,18 +20,20 @@
 // 5. Add more events to manage
 // 6. Add more EWMH atoms
 // 7. Add dmenu (Install dmenu)
+// 8. Add a way to move a window and center it
 
 // Globals //
 
 // Macros
-#define LENGHTOF(x) (sizeof(x) / sizeof(x)[0])
+#define ARRAYSIZE(x) (sizeof(x) / sizeof(x)[0])
 
 // Mod mask Super && Shift
 #define MODKEY Mod4Mask
 #define SHIFT ShiftMask
 
 // Structures
-typedef union {
+typedef union 
+{
     int i;
     unsigned int ui;
     float f;
@@ -37,7 +41,8 @@ typedef union {
 } Arg;
 
 typedef struct Client Client; 
-struct Client {
+struct Client 
+{
     int x, y, h, w;
     int oldX, oldY, oldH, oldW;
     bool isFullscreen;
@@ -45,7 +50,8 @@ struct Client {
     Window win;
 };
 
-typedef struct {
+typedef struct 
+{
     unsigned int mod;
     KeySym keysym;
     void (*func)(const Arg *);
@@ -61,7 +67,7 @@ Atom netSupported,
     netWMStateFullscreen;
 
 // Function declaration
-void printError(char errorName[]);
+void printError(char errorName[], bool checkExit);
 int xerrorHandler(Display *dp, XErrorEvent *ee);
 void quitWM(const Arg *arg);
 void killClient(const Arg *arg);
@@ -69,31 +75,29 @@ void grabKeys(void);
 void spawn(const Arg *arg);
 Client *searchClient(Window w);
 Client *addClient(Window w);
-void rmClient(Window w);
+void rmClient(Client *c);
 void setFullscreen(const Arg *arg);
-void focusClient(Client *c);
-void unfocusClient(Client *c);
 void focus(Client *c);
-void toggleFocusClient(Client *c, int moveBy);
+void toggleFocus(const Arg *arg);
 void evHandler(void);
 void handleAtoms(void);
-void childHandle(int sig);
 void setup(void);
 
 // Variables
 static Display *dp;
 static Window rt;
-static Screen *sc;
+static int sc;
 static XEvent ev;
 static Client *head = NULL;
 static Client *sel = NULL;
 static int running = 1;
 
-////// START USER CONFIG //////
+//////// USER CONFIG ///////
 
 // Programs
 static const char *termcmd[] = {"ns", NULL};
 static const char *browsercmd[] = {"librewolf", NULL};
+static const char *autostart[] = {"/home/zrchx/Dev/Dots/BIN/autostart", NULL};
 
 // Keybinds
 static const Key keys[] = { 
@@ -101,31 +105,29 @@ static const Key keys[] = {
     {MODKEY|SHIFT,      XK_q,      quitWM,            {0}},
     {MODKEY,            XK_z,      killClient,        {0}},
     {MODKEY,            XK_f,      setFullscreen,     {0}},
-    //{MODKEY,            XK_Tab,    toggleFocusClient, {.i = 1}},
-    //{MODKEY|SHIFT,      XK_Tab,    toggleFocusClient, {.i = -1}},
+    {MODKEY,            XK_Tab,    toggleFocus,       {.i = 1}},
+    {MODKEY|SHIFT,      XK_Tab,    toggleFocus,       {.i = -1}},
     {MODKEY,            XK_Return, spawn,             {.v = termcmd}},
     {MODKEY,            XK_b,      spawn,             {.v = browsercmd}},
 };
 
-//////// END USER CONFIG ///////
+//////// USER CONFIG ///////
 
 // Prints error codes with specific format
-void printError(char errorName[])
+void printError(char errorName[], bool checkExit)
 {
     fprintf(stderr, "zwm error: %s\n", errorName);
+    if (checkExit)
+        exit(1);
 }
 
 // Handle X11 errors
 int xerrorHandler(Display *dp, XErrorEvent *ee) 
 {
-    fprintf(stderr,"ZWM X11 ERROR:\n"
-            "TYPE: %d;\n"
-            "SERIAL: %ld;\n"
-            "CODE: %d;\n"
-            "REQUEST_CODE: %d;\n"
-            "MINOR: %d;\n",
-            ee->type, ee->serial, ee->error_code, ee->request_code, 
-            ee->minor_code);
+    (void)dp;
+    fprintf(stderr,"zwm fatal error:\n TYPE: %d;\n SERIAL: %ld;\n CODE: %d;\n REQUEST_CODE: %d;\n"
+                    "MINOR: %d;\n",
+            ee->type, ee->serial, ee->error_code, ee->request_code, ee->minor_code);
     return 0;
 }
 
@@ -135,50 +137,53 @@ void quitWM(const Arg *arg)
     running = 0;
 }
 
-// Kill a client
-void killClient(const Arg *arg)
-{
-    if (!sel) // ADD A CHECK FOR ROOT WINDOW
-        return;
-    XKillClient(dp, sel->win);
-}
-
 // Grab keys function
 void grabKeys(void)
 {
     KeyCode code;
     XUngrabKey(dp, AnyKey, AnyModifier, rt);
     
-    for (unsigned int i = 0; i < LENGHTOF(keys); i++)
-        if ((code = XKeysymToKeycode(dp, keys[i].keysym))) {
-            XGrabKey(dp, code, keys[i].mod, rt, True, 
-                     GrabModeAsync, GrabModeAsync);
-        }
+    for (unsigned int i = 0; i < ARRAYSIZE(keys); i++)
+        if ((code = XKeysymToKeycode(dp, keys[i].keysym))) 
+            XGrabKey(dp, code, keys[i].mod, rt, True, GrabModeAsync, GrabModeAsync);
 }
 
 // Launch programs
 void spawn(const Arg *arg)
 {
-    if (fork() == 0) {
-        execvp(((char **)arg->v)[0], (char **)arg->v);
+    struct sigaction sa;
+    if (fork() == 0)
+    {
+        if (dp)
+            close(ConnectionNumber(dp));
 
-        printError("Problem in spawn function");
-        exit(1);
+        setsid();
+        
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sa.sa_handler = SIG_DFL;
+        sigaction(SIGCHLD, &sa, NULL);
+
+        execvp(((char **)arg->v)[0], (char **)arg->v);
+        printError("Problem in spawn function", true);
     }
 }
 
 // Search for a client by his window id
 Client *searchClient(Window w)
 {
-    if (head != NULL) {
+    if (head != NULL) 
+    {
         Client *c = head;
         Client *x = head;
         
-        do {
+        do 
+        {
             if (c->win == w)
                 return c;
             c = c->next;
-        } while (c != x);
+        } 
+        while (c != x);
     }
     return NULL;
 }
@@ -186,15 +191,17 @@ Client *searchClient(Window w)
 // Add a client to the list
 Client *addClient(Window w)
 {
-    if (searchClient(w) != NULL) {
-        printError("The client already exist");
+    if (searchClient(w) != NULL) 
+    {
+        printError("The client already exist", false);
         return NULL;
     }
 
     Client *new = malloc(sizeof(Client));
     
-    if (new == NULL) {
-        printError("Failed to allocate memory for a client");
+    if (new == NULL) 
+    {
+        printError("Failed to allocate memory for a client", false);
         return NULL;
     } 
 
@@ -203,16 +210,19 @@ Client *addClient(Window w)
 
     new->win = w;
     new->isFullscreen = false;
-    new->x = (XWidthOfScreen(sc) - wa.width) / 2;
-    new->y = (XHeightOfScreen(sc) - wa.height) / 2;
+    new->x = (DisplayWidth(dp, sc) - wa.width) / 2;
+    new->y = (DisplayHeight(dp, sc) - wa.height) / 2;
     new->w = wa.width;
     new->h = wa.height;
     
-    if (head != NULL) {
+    if (head != NULL) 
+    {
         new->next = head->next;
         head->next = new;
         head = new;
-    } else {
+    } 
+    else 
+    {
         new->next = new;
         head = new;
     }
@@ -221,20 +231,23 @@ Client *addClient(Window w)
 }
 
 // Search for a client and removes it
-void rmClient(Window w)
+void rmClient(Client *c)
 {
-    // FIX THIS
-    Client *c = searchClient(w);
+    // FIX THIS // Kinda fixed?
     Client *x = head;
 
-    if (c != NULL) {
-        if (c->next != c) {
+    if (c != NULL) 
+    {
+        if (c->next != c) 
+        {
             while (x->next != c)
                 x = x->next;
             x->next = c->next;
-            if (c == head)
-                head = x;
-        } else {
+            if (c == sel)
+                sel = x;
+        } 
+        else 
+        {
             free(c);
             head = NULL;
             return;
@@ -245,6 +258,14 @@ void rmClient(Window w)
     return;
 }
 
+// Kill a client
+void killClient(const Arg *arg)
+{
+    if (!sel)
+        return;
+    XKillClient(dp, sel->win);
+}
+
 // Fullscreen toggle function
 void setFullscreen(const Arg *arg)
 {
@@ -253,43 +274,31 @@ void setFullscreen(const Arg *arg)
     if (c == NULL) 
         return;
 
-    if (c->isFullscreen) {
+    if (c->isFullscreen) 
+    {
         c->isFullscreen = false;
         XMoveResizeWindow(dp, c->win, c->oldX, c->oldY, c->oldW, c->oldH);
         XDeleteProperty(dp, c->win, netWMState);
-    } else if (!c->isFullscreen) {
+    } 
+    else if (!c->isFullscreen) 
+    {
         c->oldX = c->x;
         c->oldY = c->y;
         c->oldW = c->w;
         c->oldH = c->h;
 
         c->isFullscreen = true;
-        XMoveResizeWindow(dp, c->win, 0, 0,  
-                          XWidthOfScreen(sc), XHeightOfScreen(sc));
+        XMoveResizeWindow(dp, c->win, 0, 0, 
+                          DisplayWidth(dp, sc), DisplayHeight(dp, sc));
         XChangeProperty(dp, c->win, netWMState, XA_ATOM, 32, PropModeReplace, 
                         (unsigned char *)&netWMStateFullscreen, 1);
     }
     XFlush(dp);
 }
 
-
-// Focus a client
-void focusClient(Client *c)
+void unfocus(Client *c)
 {
-    if (!c)
-        return;
-
-    XSetInputFocus(dp, c->win, RevertToPointerRoot, CurrentTime);
-    XChangeProperty(dp, rt, netActiveWindow, XA_WINDOW, 32, PropModeReplace,
-                    (unsigned char *) &(c->win), 1);
-}
-
-// Remove focus of a client
-void unfocusClient(Client *c)
-{
-    if (!c)
-        return;
-
+    // Remove focus from sel window to root window
     XSetInputFocus(dp, rt, RevertToPointerRoot, CurrentTime);
     XDeleteProperty(dp, rt, netActiveWindow);
 }
@@ -297,42 +306,31 @@ void unfocusClient(Client *c)
 // Focus management
 void focus(Client *c)
 {
-    Client *x = head;
-
-    if (!c)
-        for (c = sel; c != x; c = c->next)
-    
-    if (sel && sel != c)
-        unfocusClient(sel);
-
-    if (c)
-        focusClient(c);
-    else {
-        XSetInputFocus(dp, rt, RevertToPointerRoot, CurrentTime);
-        XDeleteProperty(dp, rt, netActiveWindow);
-    }
-
+    // Set focus to c window
+    XRaiseWindow(dp, c->win);
+    XSetInputFocus(dp, c->win, RevertToParent, CurrentTime);
+    XChangeProperty(dp, rt, netActiveWindow, XA_WINDOW, 32, PropModeReplace,
+                    (unsigned char *) &(c->win), 1);
     sel = c;
+    XFlush(dp);
 }
 
 // Handle how focus work on a client window
-void toggleFocusClient(Client *c, int moveBy)
+void toggleFocus(const Arg *arg)
 {
-    Client *x = head;
+    if (!sel)
+        return;
 
-    if (moveBy > 0) {
-        for (c = c->next; c != x; c = c->next);
-        if (!c)
-            for (c = head; c != x; c = c->next);
-    } else {
-        for (x = head; x != c->next; x = x->next);
-        c = x;
-        if (!c)
-            for (; x; x = x->next);
-        c = x;
+    Client *c = NULL;
+
+    if (arg->i == 1)
+    {
+        c = sel->next;
+        focus(c);
     }
-
-    if (c) {
+    else if (arg->i == -1)
+    {
+        for (c = head; c->next != sel; c = c->next);
         focus(c);
     }
 }
@@ -340,28 +338,29 @@ void toggleFocusClient(Client *c, int moveBy)
 // Handle events
 void evHandler(void)
 {
-    switch (ev.type) {   
-        case MapRequest: {
-            if (sel != NULL)
-                unfocusClient(sel);
-
+    switch (ev.type) 
+    {   
+        case MapRequest: 
+        {
             sel = addClient(ev.xmaprequest.window);
 
-            XMoveResizeWindow(dp, sel->win, sel->x, sel->y,
-                              sel->w, sel->h);
+            XMoveResizeWindow(dp, sel->win, sel->x, sel->y, sel->w, sel->h);
             XMapWindow(dp, sel->win);
-            focusClient(sel);
+            focus(sel);
             break;
         }
-        case DestroyNotify: {
-            rmClient(ev.xdestroywindow.window);
+        case DestroyNotify: 
+        {
+            Client *c;
+            if ((c = searchClient(ev.xdestroywindow.window)))
+                rmClient(c);
             break;
         }
-        case KeyPress: {
-            KeySym keysym;
-            
-            keysym = XKeycodeToKeysym(dp, (KeyCode)ev.xkey.keycode, 0);
-            for (unsigned int i = 0; i < LENGHTOF(keys); i++)
+        case KeyPress: 
+        {
+            KeySym keysym = XkbKeycodeToKeysym(dp, (KeyCode)ev.xkey.keycode, 0, 0);
+
+            for (unsigned int i = 0; i < ARRAYSIZE(keys); i++)
                 if (keysym == keys[i].keysym && keys[i].func)
                     keys[i].func(&(keys[i].arg));
             break;
@@ -391,41 +390,39 @@ void handleAtoms(void)
                     sizeof(netSupportedAtoms) / sizeof(Atom));
 }
 
-// Handle zombies childs
-void childHandle(int sig)
-{
-    while (waitpid(-1, NULL, WNOHANG) > 0);
-}
-
 // Check and balances
 void setup(void)
-{   
+{
+    const Arg autostartArg = {.v = autostart};
+    spawn(&autostartArg);
+
+    struct sigaction sa;
+    
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART;
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGCHLD, &sa, NULL);
+
+    while (waitpid(-1, NULL, WNOHANG) > 0);
+
     XSetErrorHandler(xerrorHandler);
     
-    sc = XScreenOfDisplay(dp, DefaultScreen(dp));
-    rt = DefaultRootWindow(dp);
+    sc = DefaultScreen(dp);
+    rt = RootWindow(dp, sc);
 
     handleAtoms();
 
-    XUngrabKey(dp, AnyKey, AnyModifier, rt);
-    
     XSelectInput(dp, rt, SubstructureRedirectMask | SubstructureNotifyMask);
   
     grabKeys();
-    
-    system("~/Dev/Dots/BIN/autostart");
-
-    signal(SIGCHLD, childHandle);
     
     XFlush(dp);
 }
 
 int main(void)
 {
-    if (!(dp = XOpenDisplay(NULL))) {
-        printError("Cannot open display");
-        exit(1);
-    }
+    if (!(dp = XOpenDisplay(NULL)))
+        printError("Cannot open display", true);
    
     setup();
     
